@@ -1,6 +1,6 @@
 # CorrelatedCAMP
 ## Last Updated May 2025
-## Collaborative Project: see report for full author list
+### Collaborative Project: see report for full author list
 
 The Childhood Asthma Management Program (CAMP) collected data on the long-term effects of three treatments (budesonide, nedocromil, or placebo) on pulmonary function (measured by FEV1) in children 5-12 years old. CAMP followed up with 941 participants for 4.5 years with repeated visits to observe the progression of asthma through puberty. The goal of this project is to use correlated data methods to explore if a treatment is more effective than a placebo in increasing pulmonary function in children. 
 
