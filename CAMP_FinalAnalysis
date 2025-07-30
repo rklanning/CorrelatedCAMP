@@ -1,0 +1,515 @@
+* authors: Reghan Lanning, Sara (Shiv) Denner, Havelah Queen, Vanessa Vu, Thanvi Lalu ;
+libname PR '/home/u63575405/Spring2025/BS857/Final';
+
+
+/* Step 1: Check correlations among lung function variables and smoking-related covariates */
+proc corr data=PR.camp_teach;
+  var PREFEV POSFEV PREPF POSPF PREFVC POSFVC any_smokes parent_smokes  ;
+run;
+
+/* 
+Notes:
+- Our primary outcome is FEV1 change; therefore:
+    • FVC and peak flow (PF) variables are excluded due to high correlation with FEV1.
+    • The FEV1/FVC ratio (FF) is excluded as it is a derived variable (function of FEV1 and FVC).
+- The variable TX contains placebo subtypes (pbud, pned), so we use TG for clean grouping:
+    • TG = A (budesonide), B (nedocromil), C (placebo).
+- 'parent_smokes' is retained over 'any_smokes' as it more directly reflects chronic in-home exposure.
+- Time is modeled using discrete follow-up visits (visitc), not continuous days since randomization (fdays),
+  for clarity and alignment with study design.
+- Although FEVPRED_change was statistically significant, it was excluded from the primary model
+  as it is a transformation of the outcome variable. Including both may introduce redundancy and
+  obscure interpretability. We retained FEV_change (liters) as the primary outcome of interest.
+*/
+
+/* Step 2: Create base analysis dataset with outcome variables and essential covariates */
+data A_1;
+  set PR.camp_teach; 
+
+  /* Keep core variables for modeling (15 total at this point) */
+  keep TG ID age_rz GENDER ETHNIC visitc POSFEV;
+run;
+
+/* 
+Note on covariates:
+- hemog and wbc are only collected at RZ and F48 — we use RZ (baseline) if available.
+- agehome, anypet, woodstove, dehumid, parent_smokes are collected at RZ, F12, F24, F36, F48, F60, and F72.
+  • For these variables, we use only the baseline value (RZ) to maintain consistency.
+  • For woodstove and dehumidifier usage, we apply a simple NOCB (Next Observation Carried Backward) strategy
+    using F12 data when RZ is missing — assuming these features are relatively stable across early visits.
+*/
+
+proc sql noprint;
+  create table PR.CAMP_1 as
+  select distinct 
+         a.*,
+         b.hemog, 
+         b.wbc, 
+         b.agehome, 
+         b.anypet,
+         b.parent_smokes,
+         coalesce(b.woodstove, c.woodstove) as woodstove,
+         coalesce(b.dehumid,  c.dehumid)  as dehumid
+  from A_1 a
+  left join PR.camp_teach (where=(visitc='000')) b
+    on a.id = b.id
+  left join PR.camp_teach (where=(visitc='012')) c
+    on a.id = c.id;
+    
+    /*Variables with misisng value:POSFEV,hemog,wbc,agehome*/;
+quit;
+
+/* missing in dataset */
+proc means data=PR.CAMP_1 N NMISS;
+run;
+
+/* hemoglobin < 5 */
+proc means data=PR.CAMP_1;
+var hemog;
+run;
+data hemog; set PR.CAMP_1;
+where hemog < 5;
+run; 
+proc sort data=hemog;
+by id;
+run;
+proc print data=hemog;
+var id hemog;
+by id;
+run; 
+
+/****************************
+*   FINAL DATASET           *
+*****************************/
+/* id = 744 and 875 have hemog < 5 -- REMOVE 2 subjects from dataset */
+data PR.CAMP_1; set PR.CAMP_1;
+where id not in (744, 875);
+run;
+proc means data=PR.CAMP_1;
+var id;
+run;
+* how many IDs after removal;
+proc sql;
+	select count(distinct id) from pr.camp_1;
+run; *693 patients;
+
+
+proc mixed data=PR.CAMP_1 method=ml PLOTS(MAXPOINTS= 20000 );
+  class  TG visitc(ref='000') GENDER ETHNIC dehumid woodstove anypet parent_smokes;
+  model POSFEV = TG visitc hemog agehome parent_smokes
+                     age_rz GENDER wbc anypet woodstove dehumid/ solution;
+  repeated visitc / subject=ID type=AR(1);
+run;
+
+proc mixed data=PR.CAMP_1 method=ml plots(maxpoints=20000);
+  class ID TG visitc(ref='000') dehumid GENDER ETHNIC;
+  model POSFEV = TG visitc age_rz GENDER ETHNIC hemog agehome dehumid / solution;
+  repeated visitc / subject=ID type=AR(1);
+run;  
+      
+/*Final*/      
+proc mixed data=PR.CAMP_1 method=ml plots(maxpoints=20000);
+  class ID TG visitc(ref='000') dehumid GENDER ETHNIC;
+  model POSFEV = TG visitc TG*visitc age_rz GENDER ETHNIC hemog/ solution;
+  repeated visitc / subject=ID type=CS;
+run;
+
+/*** find number of total visits ***/
+
+proc print data = PR.CAMP_1 (obs = 20);
+run;
+
+proc freq data = PR.CAMP_1;
+	tables visitc;
+run;
+*20 total visits, so p = 20;
+ 
+/* Covariance Structure */
+
+title 'Unstructured Covariance Pattern';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = REML plots(maxpoints=20000);
+	class ID TG visitc dehumid GENDER ETHNIC;
+	model POSFEV = TG visitc TG*visitc age_rz GENDER ETHNIC hemog/ s chisq;
+  	repeated visitc / subject=ID type=un;
+run;
+
+title 'Heterogeneous Compound Symmetry';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = REML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG visitc TG*visitc age_rz GENDER ETHNIC hemog/ s chisq;
+  	repeated visitc / subject=ID type=csh;
+run;
+
+title 'Compound Symmetry';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = REML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG visitc TG*visitc age_rz GENDER ETHNIC hemog/ s chisq;
+  	repeated visitc / subject=ID type=cs;
+run;
+
+title 'Heterogeneous AR(1)';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = REML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG visitc TG*visitc age_rz GENDER ETHNIC hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '1st Order Autoregressive - AR(1)';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = REML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG visitc TG*visitc age_rz GENDER ETHNIC hemog/ s chisq;
+  	repeated visitc / subject=ID type=ar(1);
+run;
+
+
+/* estimation with ML, using HAR(1) as correlation structure */
+
+* fully saturated model with 6 interaction terms;
+title 'Saturated Model';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc|age_rz|GENDER|ETHNIC|hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+* three way interaction;
+title '3-Way interaction, TG, Visit, Age';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc|age_rz GENDER ETHNIC hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+* two way interaction for better data fit with a model;
+* testing several combinations of the variables, confirming fit through BIC;
+title '2-Way interaction (TG|Visit) with all parameters';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc age_rz GENDER ETHNIC hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) without hemoglobin';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc age_rz GENDER ETHNIC/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) without ethnicity';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc age_rz GENDER hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) without age';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc GENDER ethnic hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) without gender';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc age_rz ethnic hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) without gender and ethnicity';
+ods select fitstatistics Tests3;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc age_rz hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) without gender, age';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc hemog ethnic/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run; 
+
+title '2-Way interaction (TG|Visit) without ethnicity, age';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc hemog gender/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run; 
+
+title '2-Way interaction (TG|Visit) without gender, ethnicity, age';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc hemog/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) without gender, ethnicity, age, hemog';
+ods select fitstatistics;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+* does including other interaction terms influence model fit?;
+** test with interaction terms that make sense to our main research goal
+	(treatment on post-fev1);
+title '2-Way interaction (TG|Visit) and interaction by age';
+ods select fitstatistics Tests3;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc hemog TG|age_rz/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) and interaction by ethnicity';
+ods select fitstatistics Tests3;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc hemog TG|ethnic/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) and interaction by gender';
+ods select fitstatistics Tests3;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc hemog TG|gender/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;
+
+title '2-Way interaction (TG|Visit) and interaction by gender and hemoglobin';
+ods select fitstatistics Tests3;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc TG|hemog TG|gender/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run; * this fits our data well, choice for final;
+
+title '2-Way interaction (TG|Visit) and interaction by gender, hemoglobin, and baselines';
+ods select fitstatistics Tests3;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') dehumid GENDER ETHNIC;
+	model POSFEV = TG|visitc TG|hemog TG|gender ETHNIC age_rz/ s chisq;
+  	repeated visitc / subject=ID type=arh(1);
+run;   
+         
+* final model implementation and interpretation;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') GENDER;
+	model POSFEV = TG|visitc TG|hemog TG|gender age_rz / s chisq cl;
+  	repeated visitc / subject=ID type=arh(1) r rcorr;
+	lsmeans TG*visitc TG*gender;
+run;
+
+* random intercept better fit?;
+proc mixed data = PR.CAMP_1 method = ML plots(maxpoints=20000);
+	class ID TG visitc(ref = '000') GENDER;
+	model POSFEV = TG|visitc TG|hemog TG|gender age_rz / s chisq cl;
+  	random intercept / subject=ID type=arh(1) g v;
+run;
+ods select hist;
+proc univariate data=PR.CAMP_1;
+	var visitc;
+run;
+* this fits the data worse than fixed effects;
+
+* confirm this removed what we needed it to;
+proc freq data = campc;
+	table visitc;
+run; * removed 73 visit observations, rerun model to see potential estimate changes;
+
+* how many IDs are in full data set versus complete dataset;
+proc sql;
+	select count(distinct id) from pr.camp_1;
+run; *695 patients;
+data complete;
+	set pr.camp_1;
+	if cmiss(of _all_) then delete;
+run;
+proc sql;
+	select count(distinct id) from complete;
+run; *667 patients;
+/* estimation with ML, using HAR(1) as correlation structure */
+/* 
+- with multiple imputation, easiest if our categorical variables
+	are numerical, not character
+- going through categorical variables and translating this to levels,
+	with reference being "healthiest/most normal" individuals
+- this includes correction of visitc to a numerical category, instead of
+	a character
+*/
+
+* this serves as a 'key' when referencing results;
+proc format;
+	value tx 2 = 'A'
+		     1 = 'B'
+		     0 = 'C';
+	value gx 1 = 'F'
+		     0 = 'M';
+	value ex 3 = 'H'
+		     2 = 'B'
+		     1 = 'O'
+		     0 = 'W';
+run;  
+
+* using this key to recode characters to numeric;
+data camp2;
+	set PR.Camp_1;
+	if (tg = 'A') then tgv = 2;
+	else if (tg = 'B') then tgv = 1;
+	else if (tg = 'C') then tgv = 0;
+	else tgv = .;
+	if (gender = 'f') then genderv = 1;
+	else if (gender = 'm') then genderv = 0;
+	else genderv = .;
+	if (ethnic = 'h') then ethnicv = 3;
+	else if (ethnic = 'b') then ethnicv = 2;
+	else if (ethnic = 'o') then ethnicv = 1;
+	else if (ethnic = 'w') then ethnicv = 0;
+	else ethnicv = .;
+run;
+
+* correction of visitc to numerical (visitv);
+data camp2;
+	set camp2;
+	visitv = input(visitc, comma9.);
+run;
+ods trace on;
+proc univariate data=camp2;
+	var visitv;
+	histogram visitv;
+run;
+ods trace off;
+* counting how many observations are missing from each of our primary variables;
+proc means data=camp2 nmiss; 
+var posfev tgv age_rz genderv ethnicv hemog visitv;
+run;
+
+* creating flag variables to identify missing frequencies
+	we only have two missing variables in this case, so only 2 lines
+	the flag will be a 1 if an observation is missing and 0 if otherwise;
+data miss;
+	set camp2;
+	if posfev =.  then posfev_f =1; else posfev_f =0;
+	if hemog  = . then hemog_f  =1; else hemog_f  =0;
+run;
+
+* looking at proportion of missingness in the variables;
+ods title 'Proportion of Missingness in Variables w. Obs Missing';
+proc freq data=miss;
+	tables posfev_f hemog_f;
+run;
+
+* using Multiple Imputation procedure to look at how missing data appears across the data;
+proc mi data=camp2 nimpute=0 ;
+	var posfev tgv age_rz genderv ethnicv hemog visitv;
+	ods select misspattern;
+run;
+
+* now moving forward with multiple imputation, 5 datasets;
+proc mi data=camp2 nimpute = 10 out=mi_camp2 seed=123;
+var posfev tgv age_rz genderv ethnicv hemog visitv;
+run;
+
+* run model we decided on with 'by' statement to run 5 times for each imputted dataset;
+
+proc mixed data = mi_camp2 method = ML plots(maxpoints=20000);
+	class ID tgv(ref = '0') visitv(ref = "0") genderv(ref = '0');
+	model POSFEV = tgv|visitv tgv|hemog tgv|genderv age_rz /s chisq covb cl;
+  	repeated visitv / subject=ID type=arh(1) r rcorr;
+  	by _Imputation_;
+  	ods output SolutionF=mixparms;
+run;
+
+* combine results, treatment group, visit, and gender had 0 variation between imputations
+	this would make sesne, as there were no missing observations in these variables
+	provides estimates for hemoglobin and intercept.;
+proc mianalyze parms=mixparms edf=28;
+	class tgv visitv genderv;
+	modeleffects intercept tgv visitv hemog genderv age_rz tgv*visitv tgv*hemog tgv*genderv;
+run;
+
+* combine chisq to see if treatment effect is significant over time still;
+
+%macro combchi(df=,chi=);
+/******************************************************************************
+Version 1.0, 4-27-00
+
+This is a BETA version. USE AT YOUR OWN RISK!. Report any errors, problems
+or questions to the e-mail address below. The latest version of this macro
+can be found at the web site below:
+
+Author:  Paul D. Allison, University of Pennsylvania
+         allison@ssc.upenn.edu
+         http://www.ssc.upenn.edu/~allison/
+
+MACRO COMBCHI combines chi-square statistics from an analysis of several data
+sets created by multiple imputation, using the method described on p. 115 of
+
+Schafer, J.L. (1997) Analysis of Incomplete Multivariate Data.  London: 
+   Chapman and Hall. 
+
+The chi-square statistics can be either Wald statistics or likelihood ratio
+statistics.  All that's needed are the several chi-square values and the
+segrees of freedom. 
+
+COMBCHI requires the installation of IML.
+
+Example of usage:
+
+Suppose a 3 d.f. test on four data sets produces chi-squares of 5.8, 7.2,
+6.1 and 8.5.  Submit the statement:
+
+   %combchi(df=3, chi=5.8 7.2 6.1 8.5)
+
+The following output is printed
+
+                 F        DF       DDF
+
+         2.1201613         3 342.22381
+
+
+                      P
+
+                   0.0974097
+
+The macro calculates an F-statistic of 2.12 with 3 and 342 degrees of freedom.  
+The associated p-value is .097.
+
+*****************************************************************************/
+proc iml;
+  df=&df;
+  g2={&chi};
+  m=ncol(g2);
+  g=sqrt(g2);
+  mg2=sum(g2)/m;
+  r=(1+1/m)*(ssq(g)-(sum(g)**2)/m)/(m-1);
+  f=(mg2/df - r*(m-1)/(m+1))/(1+r);
+  ddf=(m-1)*(1+1/r)**2/df**(3/m);
+  p=1-probf(f,df,ddf);
+  print f df ddf;
+  print p;
+run;
+
+%mend combchi;
+
+* time and trt group;
+ods title 'Effect of Treatment Changing Over Time?';
+%combchi(df=9, chi=70.78 55.27 61.92 63.37 55.44 64.22 65.88 64.06 62.65 61.73)
