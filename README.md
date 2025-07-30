@@ -1,4 +1,4 @@
-# CorrelatedCAMP
+# Longitudinal Effects of Asthma Treatments on Pulmonary Function in Children: A Fixed Model Analysis of the CAMP Study
 ## Last Updated May 2025
 ### Collaborative Project: see report for full author list
 
